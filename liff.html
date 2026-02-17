@@ -1,16 +1,276 @@
 <!doctype html>
-<html>
+<html lang="th">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Attendance</title>
+  <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 16px; background:#f7f7f7; }
+    .card { background:#fff; border-radius:14px; padding:16px; box-shadow:0 6px 18px rgba(0,0,0,.06); max-width:520px; margin: 0 auto; }
+    h1 { font-size:20px; margin: 0 0 12px; }
+    .muted { color:#666; font-size:14px; }
+    input { width:100%; padding:12px; font-size:16px; border:1px solid #ddd; border-radius:10px; margin-top:8px; }
+    .row { display:flex; gap:10px; margin-top:14px; }
+    button { flex:1; padding:14px 12px; font-size:16px; border:none; border-radius:12px; cursor:pointer; }
+    .btn-in { background:#00c300; color:#fff; }
+    .btn-out { background:#111827; color:#fff; }
+    .btn-ghost { background:#eef2ff; color:#1f2937; margin-top:10px; width:100%; }
+    .status { margin-top:12px; padding:12px; border-radius:12px; background:#f1f5f9; white-space:pre-wrap; font-size:14px; }
+    .pill { display:inline-block; padding:4px 10px; border-radius:999px; background:#eef2ff; font-size:12px; margin-left:6px; color:#334155;}
+    .danger { background:#fff1f2; }
+    .ok { background:#ecfeff; }
+    .tiny { font-size:12px; color:#64748b; margin-top:10px; }
+  </style>
 </head>
 <body>
-  <h2>Attendance LIFF Ready</h2>
-  <p id="msg">หน้าเว็บทำงานปกติ</p>
+  <div class="card">
+    <h1>บันทึกเวลาเข้างาน</h1>
+    <div class="muted">
+      ระบบจะตรวจตำแหน่ง (รัศมี 100 เมตร) ก่อนบันทึกเวลา
+      <span id="envPill" class="pill">LIFF</span>
+    </div>
 
-  <script>
-    document.getElementById("msg").innerText = "Cloud Deploy สำเร็จ";
-  </script>
+    <div id="empBlock" style="margin-top:14px;">
+      <div class="muted">Employee ID (กรอกครั้งแรกครั้งเดียว)</div>
+      <input id="employeeId" placeholder="เช่น 1001 หรือเบอร์โทร" />
+      <button class="btn-ghost" id="saveEmpBtn">บันทึก Employee ID</button>
+      <div class="tiny">* เก็บไว้ในเครื่องของพนักงาน (localStorage)</div>
+    </div>
+
+    <div id="actionBlock" style="display:none; margin-top:14px;">
+      <div class="muted">Employee ID: <b id="empShow"></b></div>
+      <div class="row">
+        <button class="btn-in" id="checkinBtn">✅ Check-in</button>
+        <button class="btn-out" id="checkoutBtn">🕘 Check-out</button>
+      </div>
+      <button class="btn-ghost" id="changeEmpBtn">เปลี่ยน Employee ID</button>
+      <div class="tiny" id="placeHint"></div>
+    </div>
+
+    <div id="status" class="status">กำลังเริ่มระบบ…</div>
+  </div>
+
+<script>
+  // ====== ตั้งค่าตรงนี้ ======
+  const LIFF_ID = "2008783010-Elqsl1d4"; // ของคุณจากหน้า LINE Developers
+  const N8N_WEBHOOK_URL = "https://primary-production-884f.up.railway.app/webhook-test/cd92cab7-fbf4-43dd-b5dc-d9dc5bcaec28"; // <-- ใส่ของคุณ
+
+  // สถานที่อนุญาต (เริ่ม 3 ที่) — แก้/เพิ่มทีหลังได้
+  // ใส่ lat/lng จริงของคุณ
+  const ALLOWED_PLACES = [
+    { id: "BKK1", name: "รัชดา (สำนักงานใหญ่)", lat: 13.000000, lng: 100.000000, radiusM: 100 },
+    { id: "BKK2", name: "สาขา 2", lat: 13.000000, lng: 100.000000, radiusM: 100 },
+    { id: "BKK3", name: "สาขา 3", lat: 13.000000, lng: 100.000000, radiusM: 100 },
+  ];
+  // ==========================
+
+  const $ = (id) => document.getElementById(id);
+  const statusEl = $("status");
+
+  function setStatus(msg, type = "info") {
+    statusEl.textContent = msg;
+    statusEl.classList.remove("danger","ok");
+    if (type === "danger") statusEl.classList.add("danger");
+    if (type === "ok") statusEl.classList.add("ok");
+  }
+
+  function toRad(x){ return x * Math.PI / 180; }
+  function haversineM(lat1, lon1, lat2, lon2) {
+    const R = 6371000;
+    const dLat = toRad(lat2-lat1);
+    const dLon = toRad(lon2-lon1);
+    const a = Math.sin(dLat/2)**2 + Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dLon/2)**2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }
+
+  function findNearestAllowed(lat, lng) {
+    let best = null;
+    for (const p of ALLOWED_PLACES) {
+      const d = haversineM(lat, lng, p.lat, p.lng);
+      const within = d <= (p.radiusM ?? 100);
+      const candidate = { ...p, distanceM: d, within };
+      if (!best || candidate.distanceM < best.distanceM) best = candidate;
+    }
+    return best;
+  }
+
+  function getEmployeeId() {
+    return (localStorage.getItem("employee_id") || "").trim();
+  }
+
+  function setEmployeeId(v) {
+    localStorage.setItem("employee_id", v.trim());
+  }
+
+  function showBlocks() {
+    const emp = getEmployeeId();
+    if (emp) {
+      $("empBlock").style.display = "none";
+      $("actionBlock").style.display = "block";
+      $("empShow").textContent = emp;
+    } else {
+      $("empBlock").style.display = "block";
+      $("actionBlock").style.display = "none";
+    }
+
+    const names = ALLOWED_PLACES.map(p => `• ${p.name} (${p.radiusM ?? 100}m)`).join("\n");
+    $("placeHint").textContent = "สถานที่ที่อนุญาต:\n" + names;
+  }
+
+  async function getLocation() {
+    return new Promise((resolve, reject) => {
+      if (!navigator.geolocation) return reject(new Error("อุปกรณ์นี้ไม่รองรับ Geolocation"));
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          accuracyM: pos.coords.accuracy
+        }),
+        (err) => reject(err),
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+      );
+    });
+  }
+
+  async function postToN8n(payload) {
+    const res = await fetch(N8N_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+    if (!res.ok) throw new Error(data?.message || `Webhook error (${res.status})`);
+    return data;
+  }
+
+  async function doPunch(type) {
+    try {
+      const emp = getEmployeeId();
+      if (!emp) {
+        setStatus("กรุณาบันทึก Employee ID ก่อน", "danger");
+        return;
+      }
+
+      setStatus("กำลังขอสิทธิ์ตำแหน่ง…");
+      const loc = await getLocation();
+
+      const nearest = findNearestAllowed(loc.lat, loc.lng);
+      if (!nearest) {
+        setStatus("ยังไม่ได้ตั้งค่าสถานที่อนุญาต", "danger");
+        return;
+      }
+
+      if (!nearest.within) {
+        setStatus(
+          `ไม่อยู่ในพื้นที่ที่อนุญาต\n` +
+          `ใกล้สุด: ${nearest.name}\n` +
+          `ระยะห่างประมาณ: ${nearest.distanceM.toFixed(0)} m\n` +
+          `ความแม่นยำ GPS: ±${loc.accuracyM?.toFixed(0)} m`,
+          "danger"
+        );
+        return;
+      }
+
+      setStatus(
+        `ผ่านเงื่อนไขสถานที่ ✅\n` +
+        `สถานที่: ${nearest.name}\n` +
+        `ระยะ: ${nearest.distanceM.toFixed(0)} m\n` +
+        `กำลังส่งข้อมูล…`
+      );
+
+      // ดึงข้อมูลผู้ใช้จาก LIFF
+      const profile = await liff.getProfile();
+      const idToken = liff.getIDToken(); // มีเมื่อ scope openid
+      const decoded = liff.getDecodedIDToken ? liff.getDecodedIDToken() : null;
+
+      const payload = {
+        event: "attendance_punch",
+        type, // "checkin" | "checkout"
+        employeeId: emp,
+        line: {
+          userId: profile.userId,
+          displayName: profile.displayName,
+          pictureUrl: profile.pictureUrl,
+          idToken: idToken || null,
+          email: decoded?.email || null,
+        },
+        location: {
+          lat: loc.lat,
+          lng: loc.lng,
+          accuracyM: loc.accuracyM,
+          placeId: nearest.id,
+          placeName: nearest.name,
+          distanceM: Number(nearest.distanceM.toFixed(2)),
+          radiusM: nearest.radiusM ?? 100,
+        },
+        clientTimeISO: new Date().toISOString(),
+        userAgent: navigator.userAgent,
+      };
+
+      const result = await postToN8n(payload);
+
+      setStatus(
+        `บันทึกสำเร็จ ✅\n` +
+        `ประเภท: ${type}\n` +
+        `พนักงาน: ${emp}\n` +
+        `สถานที่: ${nearest.name}\n\n` +
+        `ผลตอบกลับ: ${result?.message ?? "OK"}`,
+        "ok"
+      );
+
+      // ปิดหน้าหลังสำเร็จ (ถ้าเปิดใน LINE)
+      setTimeout(() => {
+        if (liff.isInClient()) liff.closeWindow();
+      }, 1200);
+
+    } catch (e) {
+      const msg = e?.message || String(e);
+      setStatus(`เกิดข้อผิดพลาด ❌\n${msg}`, "danger");
+    }
+  }
+
+  // UI handlers
+  $("saveEmpBtn").addEventListener("click", () => {
+    const v = $("employeeId").value.trim();
+    if (!v) return setStatus("กรุณากรอก Employee ID", "danger");
+    setEmployeeId(v);
+    setStatus("บันทึก Employee ID แล้ว ✅", "ok");
+    showBlocks();
+  });
+
+  $("changeEmpBtn").addEventListener("click", () => {
+    localStorage.removeItem("employee_id");
+    $("employeeId").value = "";
+    setStatus("ลบ Employee ID แล้ว กรอกใหม่ได้", "info");
+    showBlocks();
+  });
+
+  $("checkinBtn").addEventListener("click", () => doPunch("checkin"));
+  $("checkoutBtn").addEventListener("click", () => doPunch("checkout"));
+
+  // Init LIFF
+  (async () => {
+    try {
+      setStatus("กำลังเชื่อมต่อ LINE…");
+      await liff.init({ liffId: LIFF_ID });
+
+      $("envPill").textContent = liff.isInClient() ? "LINE" : "Browser";
+
+      if (!liff.isLoggedIn()) {
+        setStatus("กำลังพาไปล็อกอิน LINE…");
+        liff.login({ redirectUri: window.location.href });
+        return;
+      }
+
+      showBlocks();
+      setStatus("พร้อมใช้งาน ✅ เลือก Check-in หรือ Check-out");
+    } catch (e) {
+      setStatus("LIFF init ไม่สำเร็จ: " + (e?.message || e), "danger");
+    }
+  })();
+</script>
 </body>
 </html>
