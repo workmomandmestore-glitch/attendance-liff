@@ -207,7 +207,10 @@
 
       if (!liff.isLoggedIn()) {
         setStatus("กำลังพาไปล็อกอิน LINE…");
-        liff.login({ redirectUri: window.location.href });
+        liff.login({
+  redirectUri: "https://attendance-liff.pages.dev/liff"
+});
+
         return;
       }
 
